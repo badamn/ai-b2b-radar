@@ -1,6 +1,22 @@
 ---
 name: ai-b2b-radar
 description: Находит новые AI-технологии, модели, агенты и продукты в бесплатных источниках и оценивает потенциал успешного B2B-продукта через потребность, покупателя, ценность и масштаб спроса. Используй для AI scouting и дайджеста перспективных продуктовых идей для бизнеса.
+# Ouroboros (razzant/ouroboros) manifest fields; other agents ignore them.
+version: 1.0.0
+type: script
+runtime: python3
+timeout_sec: 300
+permissions: [net, fs, subprocess]
+when_to_use: Пользователь просит найти новые AI-продукты, инструменты или модели и оценить их B2B-потенциал.
+scripts:
+  - name: collect.py
+    description: Сбор сигналов из GitHub, Хабра, Hugging Face, HN, YC, AINews и чтение страниц по --url.
+  - name: report.py
+    description: Валидация дайджеста JSON (схема v4) и генерация самостоятельного HTML-отчёта.
+  - name: score.py
+    description: Расчёт баллов продаваемости по пяти критериям.
+  - name: check.py
+    description: Самопроверка скриптов без сети.
 ---
 
 # AI B2B Radar

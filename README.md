@@ -8,6 +8,17 @@ Agent skill: finds new AI technologies, models and products in free sources (Git
 npx skills add badamn/ai-b2b-radar
 ```
 
+Pick agents with `-a` (e.g. `-a codex -a cursor`), install globally with `-g`.
+
+### Ouroboros (razzant/ouroboros)
+
+`SKILL.md` carries an Ouroboros `type: script` manifest (`net`, `fs`, `subprocess`). Copy the skill into the external bucket, then review and enable it in **Skills**:
+
+```bash
+git clone --depth 1 https://github.com/badamn/ai-b2b-radar /tmp/ai-b2b-radar
+cp -R /tmp/ai-b2b-radar/ai-b2b-radar ~/Ouroboros/data/skills/external/
+```
+
 Requires Python 3.9+ (standard library only) for the collector, scoring and report scripts.
 
 ## Check
