@@ -6,6 +6,8 @@ import json
 import sys
 from pathlib import Path
 
+from collect import write_new
+
 CRITERIA = ("pain", "buyer", "value", "repeatability", "timing")
 CONFIDENCE = {"low": 0, "medium": 1, "high": 2}
 
@@ -76,8 +78,7 @@ def main():
         result = score(json.loads(args.input.read_text(encoding="utf-8")))
         encoded = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         if args.output:
-            with args.output.open("x", encoding="utf-8") as stream:
-                stream.write(encoded)
+            write_new(args.output, encoded)
         else:
             print(encoded, end="")
     except (ValueError, OSError) as error:

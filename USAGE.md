@@ -56,7 +56,7 @@
 
 ## Что получится
 
-В папке `reports/` рабочего проекта:
+В папке `reports/` рабочего проекта (в Ouroboros — в папке состояния скилла `data/state/skills/ai-b2b-radar/`; скрипты не пишут за её пределы):
 
 - `ai-b2b-radar-YYYY-MM-DD-HHMMSS.json` — типизированный дайджест (схема `ai-b2b-digest/v4`);
 - `ai-b2b-radar-YYYY-MM-DD-HHMMSS.html` — отчёт, открывается в браузере офлайн;

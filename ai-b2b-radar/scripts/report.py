@@ -9,7 +9,7 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-from collect import canonical
+from collect import canonical, write_new
 from score import CRITERIA, score
 
 CATEGORIES = {"products": "Продукты и бизнес-сервисы",
@@ -291,8 +291,7 @@ def main():
     try:
         result = render(json.loads(args.input.read_text(encoding="utf-8")))
         if args.output:
-            with args.output.open("x", encoding="utf-8") as stream:
-                stream.write(result)
+            write_new(args.output, result)
         else:
             print(result, end="")
     except (OSError, ValueError) as error:

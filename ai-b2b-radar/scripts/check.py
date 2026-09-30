@@ -70,7 +70,13 @@ def main():
     rows, errors = collect.parse_discovery(yc, "https://www.ycombinator.com/launches", "yc")
     assert rows[0]["official_url"] == "https://example.com/" and rows[0]["published_at"] == "2026-09-21T12:00:00+00:00"
     rss = '<rss><channel><item><title>Old</title><link>https://example.com/p?id=1</link><pubDate>Tue, 01 Sep 2026 12:00:00 GMT</pubDate></item><item><title>New</title><link>https://example.com/p?id=2</link><pubDate>Mon, 21 Sep 2026 12:00:00 GMT</pubDate></item></channel></rss>'
-    items = collect.parse_feed(rss)
+    items, errors = collect.parse_feed(rss)
+    assert not errors
+    # One malformed record is reported, not fatal for the whole feed.
+    rows, errors = collect.parse_feed(rss.replace("<channel>", "<channel><item><title>Bad</title><link>javascript:alert(1)</link></item>"))
+    assert len(rows) == 2 and len(errors) == 1
+    rows, errors = collect.parse_discovery(json.dumps({"hits": [{"title": "no slug"}, json.loads(yc)["hits"][0]]}), "https://www.ycombinator.com/launches", "yc")
+    assert len(rows) == 1 and len(errors) == 1
     items.append(dict(items[1], url=collect.canonical(items[1]["url"] + "&utm_source=other")))
     window = ("2026-09-15T00:00:00+00:00", "2026-09-22T00:00:00+00:00", 10)
     normalized = collect.normalize(items, *window)
@@ -80,7 +86,7 @@ def main():
     future = collect.signal("Future", "https://example.com/future", "article", "2027-01-01")
     assert collect.normalize([future], *window)["future"] == 1
     atom = '<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Atom</title><link href="https://example.com/atom"/><updated>2026-09-21T12:00:00Z</updated></entry></feed>'
-    assert collect.parse_feed(atom)[0]["modified_at"] == "2026-09-21T12:00:00+00:00"
+    assert collect.parse_feed(atom)[0][0]["modified_at"] == "2026-09-21T12:00:00+00:00"
     assert collect.date("not a date") is None
     assert collect.date({"invalid": "date"}) is None
     assert collect.date("2026-09-21T14:00:00+02:00") == "2026-09-21T12:00:00+00:00"
@@ -125,7 +131,19 @@ def main():
     finally:
         collect.fetch = original_fetch
 
-    with tempfile.TemporaryDirectory() as directory:
+    # A spent time budget refuses new requests before any network access.
+    collect.DEADLINE = 0
+    try:
+        collect.fetch("https://example.com")
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("Fetched after the time budget was spent")
+    finally:
+        collect.DEADLINE = None
+
+    # Temporary files stay inside the same root that --output is confined to.
+    with tempfile.TemporaryDirectory(dir=collect.output_root()) as directory:
         root = Path(directory)
         input_path, output_path = root / "in.json", root / "out.json"
         input_path.write_text(json.dumps([record]), encoding="utf-8")
@@ -135,6 +153,10 @@ def main():
         previous = output_path.read_bytes()
         assert subprocess.run(command, capture_output=True).returncode == 2
         assert output_path.read_bytes() == previous
+        escape = collect.output_root().parent / f"ai-b2b-radar-escape-{root.name}.json"
+        for outside in ("../" + escape.name, str(escape)):
+            run = subprocess.run(command[:-1] + [outside], capture_output=True, text=True)
+            assert run.returncode == 2 and "must stay inside" in run.stderr and not escape.exists(), outside
         saved = root / "page.html"
         saved.write_text(html, encoding="utf-8")
         run = subprocess.run([sys.executable, "-B", str(Path(__file__).with_name("collect.py")), "--html", str(saved), "--url", "https://example.com"], check=True, capture_output=True, text=True)

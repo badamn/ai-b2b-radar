@@ -4,9 +4,11 @@
 import argparse
 import ipaddress
 import json
+import os
 import re
 import socket
 import sys
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -23,6 +25,36 @@ FEEDS = {
     "ainews": "https://news.smol.ai/rss.xml",
 }
 SOURCES = ("github", "github-trending", *FEEDS, "hf-models", "hf-spaces", "hn", "yc")
+DEADLINE = None  # time.monotonic() value after which fetch() refuses new requests
+
+
+def output_root():
+    """Directory that --output may write into: the Ouroboros skill state dir, else the working directory."""
+    return Path(os.environ.get("OUROBOROS_SKILL_STATE_DIR") or Path.cwd()).resolve()
+
+
+def write_new(path, text):
+    """Create a new file inside output_root(); relative paths resolve against it, existing files are preserved."""
+    root = output_root()
+    target = (root / path).resolve()
+    if target != root and root not in target.parents:
+        raise ValueError(f"--output must stay inside {root}")
+    with target.open("x", encoding="utf-8") as stream:
+        stream.write(text)
+
+
+def records(values, build, errors):
+    """Build one item per record; a malformed record is reported in errors instead of failing the whole source."""
+    items = []
+    for value in values:
+        try:
+            item = build(value)
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            errors.append(f"skipped record: {error}")
+        else:
+            if item is not None:
+                items.append(item)
+    return items
 
 
 def canonical(url):
@@ -53,9 +85,14 @@ class PublicRedirect(HTTPRedirectHandler):
 
 
 def fetch(url):
+    timeout = 15
+    if DEADLINE is not None:
+        timeout = min(timeout, DEADLINE - time.monotonic())
+        if timeout <= 0:
+            raise TimeoutError("collection time budget exhausted")
     public_url(url)
     request = Request(url, headers={"User-Agent": "ai-b2b-radar/1.0", "Accept": "application/json, application/xml, text/html;q=0.9, */*;q=0.8"})
-    with build_opener(PublicRedirect()).open(request, timeout=15) as response:
+    with build_opener(PublicRedirect()).open(request, timeout=timeout) as response:
         body = response.read(MAX_BYTES + 1)
         if len(body) > MAX_BYTES:
             raise ValueError("Response exceeds 8 MB")
@@ -158,22 +195,26 @@ def signal(title, url, kind, published=None, modified=None, excerpt=""):
 
 def parse_feed(body):
     root = ET.fromstring(body)
-    items = []
-    for entry in root.findall("./channel/item"):
+    if root.tag not in ("rss", "{http://www.w3.org/2005/Atom}feed"):
+        raise ValueError("Expected an RSS or Atom feed")
+    atom = {"a": "http://www.w3.org/2005/Atom"}
+
+    def rss_item(entry):
         url = entry.findtext("link")
         if url:
             description = parse_page(unescape(entry.findtext("description", "")), url)["text"]
-            items.append(signal(entry.findtext("title", ""), url, "article", entry.findtext("pubDate"), excerpt=description))
-    atom = {"a": "http://www.w3.org/2005/Atom"}
-    for entry in root.findall("a:entry", atom):
+            return signal(entry.findtext("title", ""), url, "article", entry.findtext("pubDate"), excerpt=description)
+
+    def atom_entry(entry):
         link = next((x.get("href") for x in entry.findall("a:link", atom)
                      if x.get("rel", "alternate") == "alternate" and x.get("href")), None)
         if link:
-            items.append(signal(entry.findtext("a:title", "", atom), link, "article",
-                                entry.findtext("a:published", None, atom), entry.findtext("a:updated", None, atom)))
-    if root.tag not in ("rss", "{http://www.w3.org/2005/Atom}feed"):
-        raise ValueError("Expected an RSS or Atom feed")
-    return items
+            return signal(entry.findtext("a:title", "", atom), link, "article",
+                          entry.findtext("a:published", None, atom), entry.findtext("a:updated", None, atom))
+
+    errors = []
+    items = records(root.findall("./channel/item"), rss_item, errors) + records(root.findall("a:entry", atom), atom_entry, errors)
+    return items, errors
 
 
 def gather(source, since, limit, queries=None):
@@ -181,7 +222,7 @@ def gather(source, since, limit, queries=None):
         return fetch(url)[0]
 
     if source in FEEDS:
-        return parse_feed(read(FEEDS[source])), []
+        return parse_feed(read(FEEDS[source]))
     if source == "github":
         queries = queries or [f"topic:{topic} pushed:>={since[:10]} archived:false"
                               for topic in ("ai-agents", "workflow-automation", "document-processing", "machine-learning")]
@@ -193,19 +234,20 @@ def gather(source, since, limit, queries=None):
                 data = json.loads(read(url))
                 if not isinstance(data, dict) or not isinstance(data.get("items"), list):
                     raise ValueError("GitHub response must contain an items array")
-                items.extend(signal(x["full_name"], x["html_url"], "repository", x.get("created_at"),
-                                    x.get("pushed_at"), x.get("description") or "") for x in data["items"])
+                items.extend(records(data["items"], lambda x: signal(x["full_name"], x["html_url"], "repository", x.get("created_at"),
+                                                                      x.get("pushed_at"), x.get("description") or ""), errors))
             except (OSError, ValueError, KeyError, TypeError) as error:
                 errors.append(f"{query}: {error}")
         return items, errors
     if source.startswith("hf-"):
         kind = source.removeprefix("hf-")
         data = json.loads(read(f"https://huggingface.co/api/{kind}?sort=lastModified&direction=-1&limit={limit}"))
-        if not isinstance(data, list) or any(not isinstance(x, dict) for x in data):
+        if not isinstance(data, list):
             raise ValueError("Hugging Face response must be an array of objects")
         prefix = "spaces/" if kind == "spaces" else ""
-        return [signal(x["id"], "https://huggingface.co/" + prefix + x["id"], kind,
-                       x.get("createdAt"), x.get("lastModified")) for x in data], []
+        errors = []
+        return records(data, lambda x: signal(x["id"], "https://huggingface.co/" + prefix + x["id"], kind,
+                                              x.get("createdAt"), x.get("lastModified")), errors), errors
     if source == "hn":
         ids = json.loads(read("https://hacker-news.firebaseio.com/v0/showstories.json"))
         if not isinstance(ids, list):
@@ -213,7 +255,8 @@ def gather(source, since, limit, queries=None):
         items, errors = [], []
         for item_id in ids[:limit]:
             if type(item_id) is not int or item_id < 0:
-                raise ValueError("HN returned an invalid item id")
+                errors.append(f"skipped invalid HN item id {item_id!r}")
+                continue
             try:
                 item = json.loads(read(f"https://hacker-news.firebaseio.com/v0/item/{item_id}.json"))
                 if item is not None and not isinstance(item, dict):
@@ -236,8 +279,8 @@ def parse_discovery(body, url, source):
         data = json.loads(body)
         if not isinstance(data.get("hits"), list):
             raise ValueError("YC response must contain a hits array")
-        items = []
-        for hit in data["hits"]:
+
+        def launch(hit):
             if not isinstance(hit, dict) or not isinstance(hit.get("slug"), str):
                 raise ValueError("YC launch must contain a slug")
             launch_url = "https://www.ycombinator.com/launches/" + quote(hit["slug"], safe="")
@@ -245,12 +288,14 @@ def parse_discovery(body, url, source):
             company = hit.get("company")
             if isinstance(company, dict) and company.get("url"):
                 row["official_url"] = canonical(company["url"])
-            items.append(row)
-        return items, []
+            return row
+
+        errors = []
+        return records(data["hits"], launch, errors), errors
     page = Page(url)
     page.feed(body)
-    items = []
-    for link in page.heading_links if source == "github-trending" else page.links:
+
+    def discovery(link):
         parts = urlsplit(link["url"])
         if source == "github-trending":
             # ponytail: public Trending markup; use search/browser if GitHub changes this layout.
@@ -258,9 +303,12 @@ def parse_discovery(body, url, source):
         else:
             accepted = parts.hostname == "www.ycombinator.com" and re.match(r"/(launches|companies)/[^/]+", parts.path)
         if accepted:
-            items.append(signal(link["text"] or parts.path, link["url"], "discovery"))
+            return signal(link["text"] or parts.path, link["url"], "discovery")
+
+    errors = []
+    items = records(page.heading_links if source == "github-trending" else page.links, discovery, errors)
     items = list({item["url"]: item for item in items}.values())
-    return items, [] if items else ["No product links extracted; inspect the page with a browser"]
+    return items, errors if items else errors + ["No product links extracted; inspect the page with a browser"]
 
 
 def normalize(items, since, until, limit):
@@ -290,10 +338,16 @@ def main():
     parser.add_argument("--query", action="append", help="Repeatable GitHub repository search; replaces default topic searches")
     parser.add_argument("--url", help="Extract a single public page instead of collecting signals")
     parser.add_argument("--html", type=Path, help="Parse saved HTML with --url as its base, without fetching")
-    parser.add_argument("--output", type=Path, help="New JSON file; existing files are preserved")
+    parser.add_argument("--output", type=Path, help="New JSON file inside the working directory (or OUROBOROS_SKILL_STATE_DIR); existing files are preserved")
+    parser.add_argument("--budget", type=int, default=240,
+                        help="Seconds for all network requests, 10–3600; default 240. On exhaustion the collected part is saved")
     args = parser.parse_args()
     if not 1 <= args.limit <= 100:
         parser.error("--limit must be between 1 and 100")
+    if not 10 <= args.budget <= 3600:
+        parser.error("--budget must be between 10 and 3600 seconds")
+    global DEADLINE
+    DEADLINE = time.monotonic() + args.budget
     if args.query and (args.url or args.html or (args.source and "github" not in args.source)):
         parser.error("--query requires GitHub collection")
     now = datetime.now(timezone.utc)
@@ -328,8 +382,7 @@ def main():
             result["coverage"] = "bounded sample; publication/modification dates require event verification"
         encoded = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         if args.output:
-            with args.output.open("x", encoding="utf-8") as stream:
-                stream.write(encoded)
+            write_new(args.output, encoded)
         else:
             print(encoded, end="")
         if "sources" in result and all(x["status"] == "unavailable" for x in result["sources"]):
