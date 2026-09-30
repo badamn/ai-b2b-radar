@@ -2,6 +2,8 @@
 
 Agent skill: finds new AI technologies, models and products in free sources (GitHub, Habr, Hugging Face, Hacker News, YC, AINews) and scores their potential as B2B products — need, buyer, value, repeatability and advantage over competitors. Output is a typed JSON digest and a standalone HTML report.
 
+**Usage guide (RU):** [USAGE.md](USAGE.md) — prompts, parameters, output.
+
 ## Install
 
 ```bash
